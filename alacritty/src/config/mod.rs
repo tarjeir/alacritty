@@ -384,4 +384,65 @@ mod tests {
         fs::write(&path, "[window]\nopacity = 0.5").unwrap();
         assert!(deserialize_config(&path).is_ok());
     }
+
+    fn parse_with_paths(root: &Path) -> (Result<Value>, Vec<PathBuf>) {
+        let mut paths = Vec::new();
+        let result = parse_config(root, &mut paths, IMPORT_RECURSION_LIMIT);
+        (result, paths)
+    }
+
+    #[test]
+    fn import_missing_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root.toml");
+        fs::write(
+            &root,
+            "[window]\nopacity = 0.5\n\n[general]\nimport = [\"missing.toml\"]\n",
+        )
+        .unwrap();
+
+        let (result, paths) = parse_with_paths(&root);
+
+        let config = result.unwrap();
+        assert_eq!(config["window"]["opacity"].as_float(), Some(0.5));
+        assert_eq!(paths, vec![root, dir.path().join("missing.toml")]);
+    }
+
+    #[test]
+    fn import_recursion_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let count = IMPORT_RECURSION_LIMIT + 3;
+        for i in 0..count {
+            let contents = format!("[general]\nimport = [\"chain{}.toml\"]\n", i + 1);
+            fs::write(dir.path().join(format!("chain{i}.toml")), contents).unwrap();
+        }
+        fs::write(dir.path().join(format!("chain{count}.toml")), "").unwrap();
+
+        let (result, paths) = parse_with_paths(&dir.path().join("chain0.toml"));
+
+        assert!(result.is_ok());
+        assert_eq!(paths.len(), IMPORT_RECURSION_LIMIT + 1);
+    }
+
+    #[test]
+    fn import_merges_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root.toml");
+        fs::write(
+            &root,
+            "[general]\nimport = [\"extra.toml\"]\n\n[window]\nopacity = 0.5\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("extra.toml"),
+            "[window]\nopacity = 0.9\ndecorations = \"none\"\n",
+        )
+        .unwrap();
+
+        let (result, _) = parse_with_paths(&root);
+
+        let config = result.unwrap();
+        assert_eq!(config["window"]["opacity"].as_float(), Some(0.5));
+        assert_eq!(config["window"]["decorations"].as_str(), Some("none"));
+    }
 }
