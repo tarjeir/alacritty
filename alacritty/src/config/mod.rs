@@ -3,11 +3,9 @@ use std::path::{Path, PathBuf};
 use std::result::Result as StdResult;
 use std::{env, fs, io};
 
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use serde::Deserialize;
-use serde_yaml::Error as YamlError;
 use toml::de::Error as TomlError;
-use toml::ser::Error as TomlSeError;
 use toml::{Table, Value};
 
 pub mod bell;
@@ -54,11 +52,8 @@ pub enum Error {
     /// Invalid toml.
     Toml(TomlError),
 
-    /// Failed toml serialization.
-    TomlSe(TomlSeError),
-
-    /// Invalid yaml.
-    Yaml(YamlError),
+    /// YAML configuration files are not supported.
+    UnsupportedYaml(PathBuf),
 }
 
 impl std::error::Error for Error {
@@ -67,8 +62,7 @@ impl std::error::Error for Error {
             Error::ReadingEnvHome(err) => err.source(),
             Error::Io(err) => err.source(),
             Error::Toml(err) => err.source(),
-            Error::TomlSe(err) => err.source(),
-            Error::Yaml(err) => err.source(),
+            Error::UnsupportedYaml(_) => None,
         }
     }
 }
@@ -81,8 +75,7 @@ impl Display for Error {
             },
             Error::Io(err) => write!(f, "Error reading config file: {err}"),
             Error::Toml(err) => write!(f, "Config error: {err}"),
-            Error::TomlSe(err) => write!(f, "Yaml conversion error: {err}"),
-            Error::Yaml(err) => write!(f, "Config error: {err}"),
+            Error::UnsupportedYaml(path) => write!(f, "{}", unsupported_yaml_message(path)),
         }
     }
 }
@@ -105,16 +98,17 @@ impl From<TomlError> for Error {
     }
 }
 
-impl From<TomlSeError> for Error {
-    fn from(val: TomlSeError) -> Self {
-        Error::TomlSe(val)
-    }
+/// Error message for YAML configuration files.
+pub fn unsupported_yaml_message(path: &Path) -> String {
+    format!(
+        "YAML configuration {path:?} is no longer supported, please migrate to TOML using \
+         `alacritty migrate` from Alacritty 0.17.0 or earlier"
+    )
 }
 
-impl From<YamlError> for Error {
-    fn from(val: YamlError) -> Self {
-        Error::Yaml(val)
-    }
+/// Check if a path points to a YAML file.
+pub fn is_yaml(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension == "yaml" || extension == "yml")
 }
 
 /// Load the configuration file.
@@ -200,7 +194,7 @@ fn parse_config(
     config_paths.push(path.to_owned());
 
     // Deserialize the configuration file.
-    let config = deserialize_config(path, false)?;
+    let config = deserialize_config(path)?;
 
     // Merge config with imports.
     let imports = load_imports(&config, path, config_paths, recursion_limit);
@@ -208,24 +202,16 @@ fn parse_config(
 }
 
 /// Deserialize a configuration file.
-pub fn deserialize_config(path: &Path, warn_pruned: bool) -> Result<Value> {
+pub fn deserialize_config(path: &Path) -> Result<Value> {
+    if is_yaml(path) {
+        return Err(Error::UnsupportedYaml(path.to_owned()));
+    }
+
     let mut contents = fs::read_to_string(path)?;
 
     // Remove UTF-8 BOM.
     if contents.starts_with('\u{FEFF}') {
         contents = contents.split_off(3);
-    }
-
-    // Convert YAML to TOML as a transitionary fallback mechanism.
-    let extension = path.extension().unwrap_or_default();
-    if (extension == "yaml" || extension == "yml") && !contents.trim().is_empty() {
-        warn!(
-            "YAML config {path:?} is deprecated, please migrate to TOML using `alacritty migrate`"
-        );
-
-        let mut value: serde_yaml::Value = serde_yaml::from_str(&contents)?;
-        prune_yaml_nulls(&mut value, warn_pruned);
-        contents = toml::to_string(&value)?;
     }
 
     // Load configuration file as Value.
@@ -277,7 +263,7 @@ fn load_imports(
 }
 
 /// Get all import paths for a configuration.
-pub fn imports(
+fn imports(
     config: &Value,
     base_path: &Path,
     recursion_limit: usize,
@@ -332,35 +318,6 @@ pub fn normalize_import(base_config_path: &Path, import_path: impl Into<PathBuf>
     import_path
 }
 
-/// Prune the nulls from the YAML to ensure TOML compatibility.
-fn prune_yaml_nulls(value: &mut serde_yaml::Value, warn_pruned: bool) {
-    fn walk(value: &mut serde_yaml::Value, warn_pruned: bool) -> bool {
-        match value {
-            serde_yaml::Value::Sequence(sequence) => {
-                sequence.retain_mut(|value| !walk(value, warn_pruned));
-                sequence.is_empty()
-            },
-            serde_yaml::Value::Mapping(mapping) => {
-                mapping.retain(|key, value| {
-                    let retain = !walk(value, warn_pruned);
-                    if let Some(key_name) = key.as_str().filter(|_| !retain && warn_pruned) {
-                        eprintln!("Removing null key \"{key_name}\" from the end config");
-                    }
-                    retain
-                });
-                mapping.is_empty()
-            },
-            serde_yaml::Value::Null => true,
-            _ => false,
-        }
-    }
-
-    if walk(value, warn_pruned) {
-        // When the value itself is null return the mapping.
-        *value = serde_yaml::Value::Mapping(Default::default());
-    }
-}
-
 /// Get the location of the first found default config file paths
 /// according to the following order:
 ///
@@ -412,42 +369,19 @@ mod tests {
         toml::from_str::<UiConfig>("").unwrap();
     }
 
-    fn yaml_to_toml(contents: &str) -> String {
-        let mut value: serde_yaml::Value = serde_yaml::from_str(contents).unwrap();
-        prune_yaml_nulls(&mut value, false);
-        toml::to_string(&value).unwrap()
+    #[test]
+    fn yaml_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.yml");
+        fs::write(&path, "window: {}").unwrap();
+        assert!(matches!(deserialize_config(&path), Err(Error::UnsupportedYaml(_))));
     }
 
     #[test]
-    fn yaml_with_nulls() {
-        let contents = r#"
-        window:
-            blinking: Always
-            cursor:
-            not_blinking: Always
-            some_array:
-              - { window: }
-              - { window: "Hello" }
-
-        "#;
-        let toml = yaml_to_toml(contents);
-        assert_eq!(
-            toml.trim(),
-            r#"[window]
-blinking = "Always"
-not_blinking = "Always"
-
-[[window.some_array]]
-window = "Hello""#
-        );
-    }
-
-    #[test]
-    fn empty_yaml_to_toml() {
-        let contents = r#"
-
-        "#;
-        let toml = yaml_to_toml(contents);
-        assert!(toml.is_empty());
+    fn toml_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.toml");
+        fs::write(&path, "[window]\nopacity = 0.5").unwrap();
+        assert!(deserialize_config(&path).is_ok());
     }
 }

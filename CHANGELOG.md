@@ -24,6 +24,10 @@ Notable changes to the `alacritty_terminal` crate are documented in its
 - Unbounded Kitty keyboard mode stack size
 - Keyboard and mouse bindings missing from `alacritty msg get-config` output
 
+### Removed
+
+- YAML configuration support, including YAML migration in `alacritty migrate` (breaking change)
+
 ## 0.17.0
 
 ### Packaging

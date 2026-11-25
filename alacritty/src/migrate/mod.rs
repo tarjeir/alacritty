@@ -10,8 +10,6 @@ use toml_edit::{DocumentMut, Item};
 use crate::cli::MigrateOptions;
 use crate::config;
 
-mod yaml;
-
 /// Handle migration.
 pub fn migrate(options: MigrateOptions) {
     // Find configuration file path.
@@ -66,15 +64,12 @@ fn migrate_config<'a>(
 ) -> Result<Migration<'a>, String> {
     // Ensure configuration file has an extension.
     let path_str = path.to_string_lossy();
-    let (prefix, suffix) = match path_str.rsplit_once('.') {
-        Some((prefix, suffix)) => (prefix, suffix),
-        None => return Err("missing file extension".to_string()),
-    };
+    if path_str.rsplit_once('.').is_none() {
+        return Err("missing file extension".to_string());
+    }
 
-    // Handle legacy YAML files.
-    if suffix == "yml" {
-        let new_path = yaml::migrate(options, path, recursion_limit, prefix)?;
-        return Ok(Migration::Yaml((path, new_path)));
+    if config::is_yaml(path) {
+        return Err(config::unsupported_yaml_message(path));
     }
 
     // TOML only does renames, so return early if they are disabled.
@@ -248,32 +243,16 @@ where
 enum Migration<'a> {
     /// In-place TOML migration.
     Toml(&'a Path),
-    /// YAML to TOML migration.
-    Yaml((&'a Path, String)),
 }
 
 impl Migration<'_> {
     /// Get the success message for this migration.
     fn success_message(&self, import: bool) -> String {
         match self {
-            Self::Yaml((original_path, new_path)) if import => {
-                format!("Successfully migrated import {original_path:?} to {new_path:?}")
-            },
-            Self::Yaml((original_path, new_path)) => {
-                format!("Successfully migrated {original_path:?} to {new_path:?}")
-            },
             Self::Toml(original_path) if import => {
                 format!("Successfully migrated import {original_path:?}")
             },
             Self::Toml(original_path) => format!("Successfully migrated {original_path:?}"),
-        }
-    }
-
-    /// Get the file path after migration.
-    fn new_path(&self) -> String {
-        match self {
-            Self::Toml(path) => path.to_string_lossy().into(),
-            Self::Yaml((_, path)) => path.into(),
         }
     }
 }
@@ -330,5 +309,18 @@ root_value = 3
     #[test]
     fn migrate_empty() {
         assert!(migrate_toml(String::new()).unwrap().to_string().is_empty());
+    }
+
+    #[test]
+    fn migrate_yaml_rejected() {
+        let options = MigrateOptions {
+            config_file: None,
+            dry_run: true,
+            skip_imports: false,
+            skip_renames: false,
+            silent: true,
+        };
+        let err = migrate_config(&options, Path::new("alacritty.yml"), 1).err().unwrap();
+        assert!(err.contains("YAML"));
     }
 }
