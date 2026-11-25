@@ -110,7 +110,8 @@ set of features with high performance.
 
 *migrate*
 
-	Migrate the configuration file.
+	Migrate TOML configuration files to the latest layout. YAML configuration files are no
+	longer supported.
 
 	*-c, --config-file* _<CONFIG_FILE>_
 
